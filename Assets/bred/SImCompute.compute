@@ -1,0 +1,92 @@
+#pragma kernel CSMain
+
+Texture2D<float4> _Input;
+RWTexture2D<float4> _Output;
+int2 _FieldSize;
+float _Stiffness;
+float _DeltaTime;
+
+void GetNeighbors(uint2 id, out float4 neighbors[4])
+{
+    int width = _FieldSize.x;
+    int height = _FieldSize.y;
+    int x = (int) id.x;
+    int y = (int) id.y;
+
+    // Вычисляем смещения координат
+    int leftX = x - 1;
+    int rightX = x + 1;
+    int downY = y - 1;
+    int upY = y + 1;
+
+    // Проверяем границы и сразу упаковываем: xyz = данные, w = валидность (1 или 0)
+    neighbors[0] = (leftX >= 0) ? float4(_Input[uint2(leftX, y)].xyz, 1.0) : float4(0, 0, 0, 0.0);
+    neighbors[1] = (rightX < width) ? float4(_Input[uint2(rightX, y)].xyz, 1.0) : float4(0, 0, 0, 0.0);
+    neighbors[2] = (downY >= 0) ? float4(_Input[uint2(x, downY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
+    neighbors[3] = (upY < height) ? float4(_Input[uint2(x, upY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
+}
+
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    if ((int) id.x >= _FieldSize.x || (int) id.y >= _FieldSize.y)
+        return;
+    
+    float pos = _Input[id.xy].x;
+    float vel = _Input[id.xy].y;
+    float mass = _Input[id.xy].z;
+    
+    float4 neighbors[4];
+    GetNeighbors(id.xy, neighbors);
+    
+    for (int i; i < 4; i++)
+    {
+        if (neighbors[i].w > 0)
+        {   
+            /*
+            float dx = neighbors[i].x - pos;
+            float f = dx * _Stiffness;
+            float a = f / mass;
+            vel += a * _DeltaTime;
+            */
+            
+            vel += (((neighbors[i].x - pos) * _Stiffness) / mass) * _DeltaTime;
+        }
+        // отпускаем концы, чтобы поменять, добавь else
+    }
+    pos += vel * _DeltaTime;
+    _Output[id.xy] = float4(pos, vel, mass, 0.0);
+
+}
+
+#pragma kernel CSInit
+
+RWTexture2D<float4> ResultTexture;
+float Seed; // Переменная для смены случайности из C#
+
+// Простая хэш-функция для генерации псевдослучайного числа [0.0 - 1.0]
+float Hash21(float2 p)
+{
+    p = frac(p * float2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return frac(p.x * p.y);
+}
+
+[numthreads(8, 8, 1)]
+void CSInit(uint3 id : SV_DispatchThreadID)
+{
+    // Генерируем случайное число для этого пикселя
+    float randomVal = Hash21(id.xy + Seed);
+    
+    // Условие: например, красим только ~5% случайных пикселей
+    float rChannel = 0.0;
+    if (randomVal > 0.95)
+    {
+        // Генерируем новое случайное значение для самого канала R
+        rChannel = Hash21(id.xy * 2.0 + Seed);
+    }
+
+    // Записываем: R = случайное число/0, остальные каналы в дефолт
+    ResultTexture[id.xy] = float4(rChannel, 0.0, 0.0, 1.0);
+}
