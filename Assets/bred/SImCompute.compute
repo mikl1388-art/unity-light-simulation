@@ -6,7 +6,11 @@ int2 _FieldSize;
 float _Stiffness;
 float _DeltaTime;
 
-void GetNeighbors(uint2 id, out float4 neighbors[4])
+#define NEI_COUNT 8
+#define BORDER 16.0
+#define ABSORBTION_STR 0.25
+
+void GetNeighborsFN(uint2 id, out float4 neighbors[4])
 {
     int width = _FieldSize.x;
     int height = _FieldSize.y;
@@ -26,6 +30,54 @@ void GetNeighbors(uint2 id, out float4 neighbors[4])
     neighbors[3] = (upY < height) ? float4(_Input[uint2(x, upY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
 }
 
+void GetNeighborsMoore(uint2 id, out float4 neighbors[8])
+{
+    int width = _FieldSize.x;
+    int height = _FieldSize.y;
+    int x = (int) id.x;
+    int y = (int) id.y;
+
+    // Вычисляем смещения координат
+    int leftX = x - 1;
+    int rightX = x + 1;
+    int downY = y - 1;
+    int upY = y + 1;
+
+    // Проверяем границы и сразу упаковываем: xyz = данные, w = валидность (1 или 0)
+    neighbors[0] = (leftX >= 0) ? float4(_Input[uint2(leftX, y)].xyz, 1.0) : float4(0, 0, 0, 0.0);
+    neighbors[1] = (rightX < width) ? float4(_Input[uint2(rightX, y)].xyz, 1.0) : float4(0, 0, 0, 0.0);
+    neighbors[2] = (downY >= 0) ? float4(_Input[uint2(x, downY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
+    neighbors[3] = (upY < height) ? float4(_Input[uint2(x, upY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
+    neighbors[4] = (leftX >= 0 && upY < height) ? float4(_Input[uint2(leftX, upY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
+    neighbors[5] = (rightX < width && upY < height) ? float4(_Input[uint2(rightX, upY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
+    neighbors[6] = (rightX < width && downY >= 0) ? float4(_Input[uint2(rightX, downY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
+    neighbors[7] = (leftX >= 0 && downY >= 0) ? float4(_Input[uint2(leftX, downY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
+}
+
+void GetNeighborsMooreLoop(uint2 id, out float4 neighbors[8])
+{
+    int width = _FieldSize.x;
+    int height = _FieldSize.y;
+    int x = (int) id.x;
+    int y = (int) id.y;
+
+    // Вычисляем смещения координат
+    int leftX  = (x == 0)          ? (width - 1)  : (x - 1);
+    int rightX = (x == width - 1)  ? (0)          : (x + 1);
+    int downY  = (y == 0)          ? (height - 1) : (y - 1);
+    int upY    = (y == height - 1) ? (0)          : (y + 1);
+
+    // Проверяем границы и сразу упаковываем: xyz = данные, w = валидность (1 или 0)
+    neighbors[0] = (leftX >= 0) ? float4(_Input[uint2(leftX, y)].xyz, 1.0) : float4(0, 0, 0, 0.0);
+    neighbors[1] = (rightX < width) ? float4(_Input[uint2(rightX, y)].xyz, 1.0) : float4(0, 0, 0, 0.0);
+    neighbors[2] = (downY >= 0) ? float4(_Input[uint2(x, downY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
+    neighbors[3] = (upY < height) ? float4(_Input[uint2(x, upY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
+    neighbors[4] = (leftX >= 0 && upY < height) ? float4(_Input[uint2(leftX, upY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
+    neighbors[5] = (rightX < width && upY < height) ? float4(_Input[uint2(rightX, upY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
+    neighbors[6] = (rightX < width && downY >= 0) ? float4(_Input[uint2(rightX, downY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
+    neighbors[7] = (leftX >= 0 && downY >= 0) ? float4(_Input[uint2(leftX, downY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
+}
+
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID)
@@ -36,13 +88,17 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     float pos = _Input[id.xy].x;
     float vel = _Input[id.xy].y;
     float mass = _Input[id.xy].z;
-    
-    float4 neighbors[4];
-    GetNeighbors(id.xy, neighbors);
-    
-    for (int i; i < 4; i++)
+    if (mass < 0.0)
     {
-        if (neighbors[i].w > 0)
+        _Output[id.xy] = float4(pos, vel, mass, 0.0);
+        return;
+    }
+    float4 neighbors[NEI_COUNT];
+    GetNeighborsMoore(id.xy, neighbors);
+    
+    for (int i = 0; i < NEI_COUNT; i++)
+    {
+        if (neighbors[i].w > 0.0)
         {   
             /*
             float dx = neighbors[i].x - pos;
@@ -53,11 +109,20 @@ void CSMain(uint3 id : SV_DispatchThreadID)
             
             vel += (((neighbors[i].x - pos) * _Stiffness) / mass) * _DeltaTime;
         }
-        // отпускаем концы, чтобы поменять, добавь else
+        else
+        {
+            //vel += (((0 - pos) * _Stiffness) / mass) * _DeltaTime;
+        }
     }
+
+    uint distToEdgeX = min(id.x, (uint) _FieldSize.x - 1 - id.x);
+    uint distToEdgeY = min(id.y, (uint) _FieldSize.y - 1 - id.y);
+    float minDist = (float) min(distToEdgeX, distToEdgeY);
+    float normalizedDist = saturate(1.0 - (minDist / BORDER));
+    float dampingFactor = 1.0 - (normalizedDist * normalizedDist * ABSORBTION_STR);
+    vel *= saturate(dampingFactor);
     pos += vel * _DeltaTime;
     _Output[id.xy] = float4(pos, vel, mass, 0.0);
-
 }
 
 #pragma kernel CSInit
@@ -76,17 +141,69 @@ float Hash21(float2 p)
 [numthreads(8, 8, 1)]
 void CSInit(uint3 id : SV_DispatchThreadID)
 {
-    // Генерируем случайное число для этого пикселя
     float randomVal = Hash21(id.xy + Seed);
     
-    // Условие: например, красим только ~5% случайных пикселей
-    float rChannel = 0.0;
-    if (randomVal > 0.95)
+    uint xSize;
+    uint ySize;
+    ResultTexture.GetDimensions(xSize, ySize);
+    float halfX = xSize / 2.0; // Приводим к float для точности математики
+    float halfY = ySize / 2.0;
+   
+    float cirX = halfX * 0.5;
+    float cirY = halfY;
+    
+    // 1. Логика для круга
+    float dx = (float) id.x - cirX;
+    float dy = (float) id.y - cirY;
+    float radiusSq = 1;
+    
+    float pos = 0.0;
+    if ((dx * dx + dy * dy) < radiusSq)
     {
-        // Генерируем новое случайное значение для самого канала R
-        rChannel = Hash21(id.xy * 2.0 + Seed);
+        pos = 10.0;
     }
 
-    // Записываем: R = случайное число/0, остальные каналы в дефолт
-    ResultTexture[id.xy] = float4(rChannel, 0.0, 0.0, 1.0);
+    float mass = 1.0;
+
+    /*// 2. Логика прямоугольника в нижней части
+    // Задаем границы: отступаем по 10 пикселей по бокам, а по высоте берем от 5 до 25 пикселя снизу
+    uint rectLeft = 10;
+    uint rectRight = xSize - 10;
+    uint rectBottom = 5;
+    uint rectTop = 25;
+
+    if (id.x >= rectLeft && id.x <= rectRight && id.y >= rectBottom && id.y <= rectTop)
+    {
+        mass = 3.0;
+    }*/
+    
+    float gap = 3.0;
+    float spacer = 5.0;
+    
+    if (id.x == cirX + 20 && ((float) id.y > cirY + 0.5 * spacer + gap || (float) id.y < cirY - (0.5 * spacer + gap) || ((float) id.y < cirY + 0.5 * spacer && (float) id.y > cirY - 0.5 * spacer)))
+    {
+        mass = -1.0;
+        pos = 0;
+    }
+    
+    ResultTexture[id.xy] = float4(pos, 0.0, mass, 1.0);
+}
+
+
+#pragma kernel CSFindBounds
+
+Texture2D<float4> SourceTexture;
+RWStructuredBuffer<int> boundsBuffer;
+
+[numthreads(8, 8, 1)]
+void CSFindBounds(uint3 id : SV_DispatchThreadID)
+{
+    float val = SourceTexture[id.xy].r;
+    
+    // Переводим во временный int для атомарной операции (умножаем на точность)
+    int intVal = (int) (val * 1000.0f);
+
+    // Безопасное параллельное сравнение по всей видеокарте
+    InterlockedMin(boundsBuffer[0], intVal);
+    InterlockedMax(boundsBuffer[1], intVal);
 }
