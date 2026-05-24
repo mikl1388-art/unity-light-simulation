@@ -1,5 +1,7 @@
+using System.Diagnostics.CodeAnalysis;
 using UnityEngine;
 
+[SuppressMessage("ReSharper", "CheckNamespace")]
 public class SimController : MonoBehaviour
 {
     [Tooltip("Размер поля")]
@@ -10,22 +12,26 @@ public class SimController : MonoBehaviour
     public float simSpeed = 1.0f;
     public ComputeShader computeShader;
     public Shader shader;
-    public float seed = 0.0f;
+    public float seed = 1.0f;
+    public float cumulativeRatio = 0.002f;
 
-    private readonly int threadSize = 8;
+    private const int ThreadSize = 8;
 
     private RenderTexture textureA;
     private RenderTexture textureB;
+    private RenderTexture cumulativeTexture;
     private bool isBufferAInput = true;
     private Material material;
 
     private int mainKernelID;
     private int inputTexID;
     private int outputTexID;
+    private int cumulativeTexID;
     private int fieldSizeID;
     private int stiffnessID;
     private int deltaTimeID;
     private int baseTextureID;
+    private int cumulativeRatioID;
 
     private Vector4 sizeVector;
     private int threadGroupsX;
@@ -39,16 +45,22 @@ public class SimController : MonoBehaviour
         mainKernelID = computeShader.FindKernel("CSMain");
         inputTexID = Shader.PropertyToID("_Input");
         outputTexID = Shader.PropertyToID("_Output");
+        cumulativeTexID = Shader.PropertyToID("_Cumulative");
         fieldSizeID = Shader.PropertyToID("_FieldSize");
         stiffnessID = Shader.PropertyToID("_Stiffness");
         deltaTimeID = Shader.PropertyToID("_DeltaTime");
+        cumulativeRatioID = Shader.PropertyToID("_CumulativeRatio");
+        
         baseTextureID = Shader.PropertyToID("_BaseTexture");
 
-        threadGroupsX = Mathf.CeilToInt((float)fieldSize.x / threadSize);
-        threadGroupsY = Mathf.CeilToInt((float)fieldSize.y / threadSize);
+        threadGroupsX = Mathf.CeilToInt((float)fieldSize.x / ThreadSize);
+        threadGroupsY = Mathf.CeilToInt((float)fieldSize.y / ThreadSize);
 
         textureA = CreateRT();
         textureB = CreateRT();
+        InitializeRT(textureA);
+        InitializeRT(textureB);
+        cumulativeTexture = CreateRT();
         sizeVector = new Vector4(fieldSize.x, fieldSize.y, 0, 0);
 
         if (TryGetComponent<MeshRenderer>(out var meshRenderer))
@@ -69,9 +81,11 @@ public class SimController : MonoBehaviour
 
         computeShader.SetTexture(mainKernelID, inputTexID, input);
         computeShader.SetTexture(mainKernelID, outputTexID, output);
+        computeShader.SetTexture(mainKernelID, cumulativeTexID, cumulativeTexture);
         computeShader.SetVector(fieldSizeID, sizeVector);
         computeShader.SetFloat(stiffnessID, stiffness);
         computeShader.SetFloat(deltaTimeID, Time.fixedDeltaTime * simSpeed);
+        computeShader.SetFloat(cumulativeRatioID, cumulativeRatio);
         computeShader.Dispatch(mainKernelID, threadGroupsX, threadGroupsY, 1);
 
         /*int[] initialBounds = new int[] { int.MaxValue, int.MinValue };
@@ -81,7 +95,7 @@ public class SimController : MonoBehaviour
         computeShader.SetBuffer(kernel, "boundsBuffer", boundsBuffer);
         computeShader.Dispatch(kernel, fieldSize.x / 8, fieldSize.y / 8, 1);
         */
-        material.SetTexture(baseTextureID, output);
+        material.SetTexture(baseTextureID, cumulativeTexture);
 
         /*if (debugInt % 200 == 0)
         {
@@ -150,18 +164,17 @@ public class SimController : MonoBehaviour
         }
     }
 
-    RenderTexture CreateRT()
+    private RenderTexture CreateRT()
     {
         RenderTexture rt = new RenderTexture(fieldSize.x, fieldSize.y, 0, RenderTextureFormat.ARGBFloat);
         rt.enableRandomWrite = true;
         rt.filterMode = FilterMode.Point;
         rt.Create();
-        InitializeRTOnGPU(rt);
         //DebugMinMax(rt);
         return rt;
     }
 
-    void InitializeRTOnGPU(RenderTexture rt)
+    private void InitializeRT(RenderTexture rt)
     {
         int initKernel = computeShader.FindKernel("CSInit");
 

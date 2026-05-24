@@ -2,13 +2,16 @@
 
 Texture2D<float4> _Input;
 RWTexture2D<float4> _Output;
+RWTexture2D<float4> _Cumulative;
+
 int2 _FieldSize;
 float _Stiffness;
 float _DeltaTime;
+float _CumulativeRatio;
 
-#define NEI_COUNT 8
+#define NEI_COUNT 4
 #define BORDER 16.0
-#define ABSORBTION_STR 0.25
+#define ABSORPTION_STR 0.25
 
 void GetNeighborsFN(uint2 id, out float4 neighbors[4])
 {
@@ -85,6 +88,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     if ((int) id.x >= _FieldSize.x || (int) id.y >= _FieldSize.y)
         return;
     
+    _Cumulative[id.xy] += float4(saturate(_Input[id.xy].r) * _CumulativeRatio, 0.0, _Input[id.xy].b, 0.0);
+    
     float pos = _Input[id.xy].x;
     float vel = _Input[id.xy].y;
     float mass = _Input[id.xy].z;
@@ -94,24 +99,13 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         return;
     }
     float4 neighbors[NEI_COUNT];
-    GetNeighborsMoore(id.xy, neighbors);
+    GetNeighborsFN(id.xy, neighbors);
     
     for (int i = 0; i < NEI_COUNT; i++)
     {
         if (neighbors[i].w > 0.0)
-        {   
-            /*
-            float dx = neighbors[i].x - pos;
-            float f = dx * _Stiffness;
-            float a = f / mass;
-            vel += a * _DeltaTime;
-            */
-            
+        {              
             vel += (((neighbors[i].x - pos) * _Stiffness) / mass) * _DeltaTime;
-        }
-        else
-        {
-            //vel += (((0 - pos) * _Stiffness) / mass) * _DeltaTime;
         }
     }
 
@@ -119,7 +113,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     uint distToEdgeY = min(id.y, (uint) _FieldSize.y - 1 - id.y);
     float minDist = (float) min(distToEdgeX, distToEdgeY);
     float normalizedDist = saturate(1.0 - (minDist / BORDER));
-    float dampingFactor = 1.0 - (normalizedDist * normalizedDist * ABSORBTION_STR);
+    float dampingFactor = 1.0 - (normalizedDist * normalizedDist * ABSORPTION_STR);
     vel *= saturate(dampingFactor);
     pos += vel * _DeltaTime;
     _Output[id.xy] = float4(pos, vel, mass, 0.0);
@@ -128,7 +122,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 #pragma kernel CSInit
 
 RWTexture2D<float4> ResultTexture;
-float Seed; // Переменная для смены случайности из C#
+float Seed;
 
 // Простая хэш-функция для генерации псевдослучайного числа [0.0 - 1.0]
 float Hash21(float2 p)
@@ -138,55 +132,60 @@ float Hash21(float2 p)
     return frac(p.x * p.y);
 }
 
+// Функция возвращает 1.0, если мы внутри круга, и 0.0, если снаружи
+float getCircleMask(uint x, uint y, float x0, float y0, float R)
+{
+    float dx = (float)x - x0;
+    float dy = (float)y - y0;
+    return step(dx * dx + dy * dy, R * R);
+}
+
+// Функция возвращает 1.0, если мы внутри прямоугольника, и 0.0, если снаружи
+float getRectangleMask(uint x, uint y, float x0, float y0, float width, float height)
+{
+    float fx = (float)x;
+    float fy = (float)y;
+    float mask = step(x0, fx) *          // x >= rectLeft
+                 step(fx, x0 + width - 1) *   // x <= rectRight
+                 step(y0, fy) *          // y >= rectBottom
+                 step(fy, y0 + height - 1);  // y <= rectTop
+
+    return mask;
+}
+
+void addCircle(uint3 id, float x0, float y0, float R, float pos, float mass, inout float4 result)
+{
+    result = lerp(result, float4(pos, 0.0, mass, 1.0), getCircleMask(id.x, id.y, x0, y0, R));
+}
+
+void addRectangle(uint3 id, float x0, float y0, float width, float height, float pos, float mass, inout float4 result)
+{
+    result = lerp(result, float4(pos, 0.0, mass, 1.0), getRectangleMask(id.x, id.y, x0, y0, width, height));
+}
+
 [numthreads(8, 8, 1)]
 void CSInit(uint3 id : SV_DispatchThreadID)
 {
     float randomVal = Hash21(id.xy + Seed);
+    float4 currentPixel = float4(0.0, 0.0, 1.0, 1.0);
     
     uint xSize;
     uint ySize;
     ResultTexture.GetDimensions(xSize, ySize);
-    float halfX = xSize / 2.0; // Приводим к float для точности математики
+    float halfX = xSize / 2.0;
     float halfY = ySize / 2.0;
-   
     float cirX = halfX * 0.5;
     float cirY = halfY;
     
-    // 1. Логика для круга
-    float dx = (float) id.x - cirX;
-    float dy = (float) id.y - cirY;
-    float radiusSq = 1;
-    
-    float pos = 0.0;
-    if ((dx * dx + dy * dy) < radiusSq)
-    {
-        pos = 10.0;
-    }
-
-    float mass = 1.0;
-
-    /*// 2. Логика прямоугольника в нижней части
-    // Задаем границы: отступаем по 10 пикселей по бокам, а по высоте берем от 5 до 25 пикселя снизу
-    uint rectLeft = 10;
-    uint rectRight = xSize - 10;
-    uint rectBottom = 5;
-    uint rectTop = 25;
-
-    if (id.x >= rectLeft && id.x <= rectRight && id.y >= rectBottom && id.y <= rectTop)
-    {
-        mass = 3.0;
-    }*/
-    
+    //addCircle(id, cirX, cirY, 1, 1.0, 1.0, currentPixel);
+    addRectangle(id, cirX, cirY - 30.0, 1.0, 60.0, 1.0, 1.0, currentPixel);
     float gap = 3.0;
-    float spacer = 5.0;
+    float spacer = 15.0;
+    addRectangle(id, cirX + 20.0, cirY + 0.5 * spacer + gap, 1.0, (float) ySize, 0.0, -1.0, currentPixel);
+    addRectangle(id, cirX + 20.0, 0.0, 1.0, cirY - 0.5 * spacer - gap, 0.0, -1.0, currentPixel);
+    addRectangle(id, cirX + 20.0, cirY - 0.5 * spacer, 1.0, spacer, 0.0, -1.0, currentPixel);
     
-    if (id.x == cirX + 20 && ((float) id.y > cirY + 0.5 * spacer + gap || (float) id.y < cirY - (0.5 * spacer + gap) || ((float) id.y < cirY + 0.5 * spacer && (float) id.y > cirY - 0.5 * spacer)))
-    {
-        mass = -1.0;
-        pos = 0;
-    }
-    
-    ResultTexture[id.xy] = float4(pos, 0.0, mass, 1.0);
+    ResultTexture[id.xy] = currentPixel;
 }
 
 

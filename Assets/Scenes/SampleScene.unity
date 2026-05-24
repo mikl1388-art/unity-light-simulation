@@ -236,10 +236,11 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::SimController
   fieldSize: {x: 300, y: 300}
   stiffness: 1
-  simSpeed: 1
+  simSpeed: 3.1
   computeShader: {fileID: 7200000, guid: 2b99e4dfc639abf40b1b5ba5db39188f, type: 3}
   shader: {fileID: 4800000, guid: 8ba71e0fe4bdd664eaebb7be7c0e1a12, type: 3}
   seed: 1
+  cumulativeRatio: 0.01
 --- !u!64 &1178408530
 MeshCollider:
   m_ObjectHideFlags: 0
@@ -805,6 +806,7 @@ MonoBehaviour:
   computeShader: {fileID: 7200000, guid: 2b99e4dfc639abf40b1b5ba5db39188f, type: 3}
   shader: {fileID: 4800000, guid: 8ba71e0fe4bdd664eaebb7be7c0e1a12, type: 3}
   seed: 1
+  cumulativeRatio: 0.002
 --- !u!1 &2123335999
 GameObject:
   m_ObjectHideFlags: 0
