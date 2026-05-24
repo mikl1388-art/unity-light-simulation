@@ -234,13 +234,17 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 6b93bebad17608f48afd7c1edce33077, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SimController
-  fieldSize: {x: 300, y: 300}
+  fieldSize: {x: 1000, y: 1000}
   stiffness: 1
-  simSpeed: 3.1
+  simSpeed: 4
+  minAllowedFPS: 20
   computeShader: {fileID: 7200000, guid: 2b99e4dfc639abf40b1b5ba5db39188f, type: 3}
   shader: {fileID: 4800000, guid: 8ba71e0fe4bdd664eaebb7be7c0e1a12, type: 3}
   seed: 1
   cumulativeRatio: 0.01
+  ColorCoef: {x: 0.95, y: 1, z: 1.05, w: 1}
+  debugStep: 100
+  debugMode: 0
 --- !u!64 &1178408530
 MeshCollider:
   m_ObjectHideFlags: 0
@@ -803,10 +807,14 @@ MonoBehaviour:
   fieldSize: {x: 3, y: 3}
   stiffness: 1
   simSpeed: 1
+  minAllowedFPS: 20
   computeShader: {fileID: 7200000, guid: 2b99e4dfc639abf40b1b5ba5db39188f, type: 3}
   shader: {fileID: 4800000, guid: 8ba71e0fe4bdd664eaebb7be7c0e1a12, type: 3}
   seed: 1
   cumulativeRatio: 0.002
+  ColorCoef: {x: 0.95, y: 1, z: 1.05, w: 1}
+  debugStep: 200
+  debugMode: 0
 --- !u!1 &2123335999
 GameObject:
   m_ObjectHideFlags: 0

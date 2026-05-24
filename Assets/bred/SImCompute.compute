@@ -1,112 +1,68 @@
+#define THREADS 16
+
 #pragma kernel CSMain
 
-Texture2D<float4> _Input;
-RWTexture2D<float4> _Output;
+struct CellData
+{
+    float4 pos;
+    float4 vel;
+    float mass;
+    float isValid;
+};
+
+StructuredBuffer<CellData> _Input;
+RWStructuredBuffer<CellData> _Output;
 RWTexture2D<float4> _Cumulative;
 
 int2 _FieldSize;
 float _Stiffness;
 float _DeltaTime;
 float _CumulativeRatio;
+float4 _ColorCoef;
 
 #define NEI_COUNT 4
 #define BORDER 16.0
 #define ABSORPTION_STR 0.25
 
-void GetNeighborsFN(uint2 id, out float4 neighbors[4])
+int Idx(uint2 id)
 {
-    int width = _FieldSize.x;
-    int height = _FieldSize.y;
-    int x = (int) id.x;
-    int y = (int) id.y;
-
-    // Вычисляем смещения координат
-    int leftX = x - 1;
-    int rightX = x + 1;
-    int downY = y - 1;
-    int upY = y + 1;
-
-    // Проверяем границы и сразу упаковываем: xyz = данные, w = валидность (1 или 0)
-    neighbors[0] = (leftX >= 0) ? float4(_Input[uint2(leftX, y)].xyz, 1.0) : float4(0, 0, 0, 0.0);
-    neighbors[1] = (rightX < width) ? float4(_Input[uint2(rightX, y)].xyz, 1.0) : float4(0, 0, 0, 0.0);
-    neighbors[2] = (downY >= 0) ? float4(_Input[uint2(x, downY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
-    neighbors[3] = (upY < height) ? float4(_Input[uint2(x, upY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
+    return id.y * _FieldSize.x + id.x;
 }
 
-void GetNeighborsMoore(uint2 id, out float4 neighbors[8])
+CellData GetNeighborData(int2 coord)
 {
-    int width = _FieldSize.x;
-    int height = _FieldSize.y;
-    int x = (int) id.x;
-    int y = (int) id.y;
-
-    // Вычисляем смещения координат
-    int leftX = x - 1;
-    int rightX = x + 1;
-    int downY = y - 1;
-    int upY = y + 1;
-
-    // Проверяем границы и сразу упаковываем: xyz = данные, w = валидность (1 или 0)
-    neighbors[0] = (leftX >= 0) ? float4(_Input[uint2(leftX, y)].xyz, 1.0) : float4(0, 0, 0, 0.0);
-    neighbors[1] = (rightX < width) ? float4(_Input[uint2(rightX, y)].xyz, 1.0) : float4(0, 0, 0, 0.0);
-    neighbors[2] = (downY >= 0) ? float4(_Input[uint2(x, downY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
-    neighbors[3] = (upY < height) ? float4(_Input[uint2(x, upY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
-    neighbors[4] = (leftX >= 0 && upY < height) ? float4(_Input[uint2(leftX, upY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
-    neighbors[5] = (rightX < width && upY < height) ? float4(_Input[uint2(rightX, upY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
-    neighbors[6] = (rightX < width && downY >= 0) ? float4(_Input[uint2(rightX, downY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
-    neighbors[7] = (leftX >= 0 && downY >= 0) ? float4(_Input[uint2(leftX, downY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
+    float inside = step(0, coord.x) * step(coord.x, _FieldSize.x - 1) *
+                   step(0, coord.y) * step(coord.y, _FieldSize.y - 1);
+    
+    int2 clampedCoord = clamp(coord, int2(0, 0), _FieldSize - 1);
+    CellData data = _Input[Idx(clampedCoord)];
+    data.mass = 1.0; 
+    data.isValid = inside;
+    return data;
 }
 
-void GetNeighborsMooreLoop(uint2 id, out float4 neighbors[8])
-{
-    int width = _FieldSize.x;
-    int height = _FieldSize.y;
-    int x = (int) id.x;
-    int y = (int) id.y;
-
-    // Вычисляем смещения координат
-    int leftX  = (x == 0)          ? (width - 1)  : (x - 1);
-    int rightX = (x == width - 1)  ? (0)          : (x + 1);
-    int downY  = (y == 0)          ? (height - 1) : (y - 1);
-    int upY    = (y == height - 1) ? (0)          : (y + 1);
-
-    // Проверяем границы и сразу упаковываем: xyz = данные, w = валидность (1 или 0)
-    neighbors[0] = (leftX >= 0) ? float4(_Input[uint2(leftX, y)].xyz, 1.0) : float4(0, 0, 0, 0.0);
-    neighbors[1] = (rightX < width) ? float4(_Input[uint2(rightX, y)].xyz, 1.0) : float4(0, 0, 0, 0.0);
-    neighbors[2] = (downY >= 0) ? float4(_Input[uint2(x, downY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
-    neighbors[3] = (upY < height) ? float4(_Input[uint2(x, upY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
-    neighbors[4] = (leftX >= 0 && upY < height) ? float4(_Input[uint2(leftX, upY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
-    neighbors[5] = (rightX < width && upY < height) ? float4(_Input[uint2(rightX, upY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
-    neighbors[6] = (rightX < width && downY >= 0) ? float4(_Input[uint2(rightX, downY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
-    neighbors[7] = (leftX >= 0 && downY >= 0) ? float4(_Input[uint2(leftX, downY)].xyz, 1.0) : float4(0, 0, 0, 0.0);
-}
-
-
-[numthreads(8, 8, 1)]
+[numthreads(THREADS, THREADS, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID)
 {
     if ((int) id.x >= _FieldSize.x || (int) id.y >= _FieldSize.y)
         return;
     
-    _Cumulative[id.xy] += float4(saturate(_Input[id.xy].r) * _CumulativeRatio, 0.0, _Input[id.xy].b, 0.0);
+    CellData cur = _Input[Idx(id.xy)];
+    CellData newCell = cur;
     
-    float pos = _Input[id.xy].x;
-    float vel = _Input[id.xy].y;
-    float mass = _Input[id.xy].z;
-    if (mass < 0.0)
-    {
-        _Output[id.xy] = float4(pos, vel, mass, 0.0);
-        return;
-    }
-    float4 neighbors[NEI_COUNT];
-    GetNeighborsFN(id.xy, neighbors);
+    //_Cumulative[id.xy] = float4(cur.pos.rgb, cur.mass);
+    _Cumulative[id.xy] += float4(max(cur.pos.rgb, 0) * _CumulativeRatio, cur.mass);
+    
+    float isWave = step(0, cur.mass);
+    
+    int2 offsets[NEI_COUNT] = { int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1) };
     
     for (int i = 0; i < NEI_COUNT; i++)
     {
-        if (neighbors[i].w > 0.0)
-        {              
-            vel += (((neighbors[i].x - pos) * _Stiffness) / mass) * _DeltaTime;
-        }
+        CellData neighbor = GetNeighborData(int2(id.xy) + offsets[i]);
+        
+        float4 deltaPos = neighbor.pos - cur.pos;
+        newCell.vel += ((deltaPos * _Stiffness) / (pow(max(1e-6, cur.mass), _ColorCoef))) * _DeltaTime * neighbor.isValid;
     }
 
     uint distToEdgeX = min(id.x, (uint) _FieldSize.x - 1 - id.x);
@@ -114,14 +70,19 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     float minDist = (float) min(distToEdgeX, distToEdgeY);
     float normalizedDist = saturate(1.0 - (minDist / BORDER));
     float dampingFactor = 1.0 - (normalizedDist * normalizedDist * ABSORPTION_STR);
-    vel *= saturate(dampingFactor);
-    pos += vel * _DeltaTime;
-    _Output[id.xy] = float4(pos, vel, mass, 0.0);
+    newCell.vel *= saturate(dampingFactor);
+    
+    newCell.pos += newCell.vel * _DeltaTime;
+    
+    newCell.pos = lerp(cur.pos, newCell.pos, isWave);
+    newCell.vel = lerp(cur.vel, newCell.vel, isWave);
+    
+    _Output[Idx(id.xy)] = newCell;
 }
 
 #pragma kernel CSInit
 
-RWTexture2D<float4> ResultTexture;
+RWStructuredBuffer<CellData> _OutputBuffer;
 float Seed;
 
 // Простая хэш-функция для генерации псевдослучайного числа [0.0 - 1.0]
@@ -132,60 +93,106 @@ float Hash21(float2 p)
     return frac(p.x * p.y);
 }
 
-// Функция возвращает 1.0, если мы внутри круга, и 0.0, если снаружи
+// Маски по-прежнему возвращают float (0.0 или 1.0)
 float getCircleMask(uint x, uint y, float x0, float y0, float R)
 {
-    float dx = (float)x - x0;
-    float dy = (float)y - y0;
+    float dx = (float) x - x0;
+    float dy = (float) y - y0;
     return step(dx * dx + dy * dy, R * R);
 }
 
-// Функция возвращает 1.0, если мы внутри прямоугольника, и 0.0, если снаружи
 float getRectangleMask(uint x, uint y, float x0, float y0, float width, float height)
 {
-    float fx = (float)x;
-    float fy = (float)y;
-    float mask = step(x0, fx) *          // x >= rectLeft
-                 step(fx, x0 + width - 1) *   // x <= rectRight
-                 step(y0, fy) *          // y >= rectBottom
-                 step(fy, y0 + height - 1);  // y <= rectTop
-
-    return mask;
+    float fx = (float) x;
+    float fy = (float) y;
+    return step(x0, fx) * step(fx, x0 + width - 1.0) * step(y0, fy) * step(fy, y0 + height - 1.0);
 }
 
-void addCircle(uint3 id, float x0, float y0, float R, float pos, float mass, inout float4 result)
+// Теперь эти функции принимают и модифицируют структуру CellData
+// Обрати внимание: pos здесь — это float3. Передаем значение в нужную ось, например, в X
+void addCircle(uint3 id, float x0, float y0, float R, float4 pos, float mass, inout CellData result)
 {
-    result = lerp(result, float4(pos, 0.0, mass, 1.0), getCircleMask(id.x, id.y, x0, y0, R));
+    float mask = getCircleMask(id.x, id.y, x0, y0, R);
+    
+    // Плавное переключение всей структуры по маске
+    result.pos = lerp(result.pos, pos, mask);
+    result.mass = lerp(result.mass, mass, mask);
 }
 
-void addRectangle(uint3 id, float x0, float y0, float width, float height, float pos, float mass, inout float4 result)
+void addRectangle(uint3 id, float x0, float y0, float width, float height, float4 pos, float mass, inout CellData result)
 {
-    result = lerp(result, float4(pos, 0.0, mass, 1.0), getRectangleMask(id.x, id.y, x0, y0, width, height));
+    float mask = getRectangleMask(id.x, id.y, x0, y0, width, height);
+    
+    result.pos = lerp(result.pos, pos, mask);
+    result.mass = lerp(result.mass, mass, mask);
 }
 
-[numthreads(8, 8, 1)]
+float edgeSide(float2 p, float2 a, float2 b)
+{
+    return (p.x - a.x) * (b.y - a.y) - (p.y - a.y) * (b.x - a.x);
+}
+
+float getTriangleMask(uint x, uint y, float2 v1, float2 v2, float2 v3)
+{
+    float2 p = float2((float) x, (float) y);
+
+    // Вычисляем положение пикселя относительно каждого из трех ребер
+    float s1 = edgeSide(p, v1, v2);
+    float s2 = edgeSide(p, v2, v3);
+    float s3 = edgeSide(p, v3, v1);
+
+    // Проверяем, что знак одинаковый для всех трех ребер (ориентация по или против часовой)
+    // step(0.0, s) вернет 1.0, если точка "слева" или на ребре
+    float has_neg = step(s1, 0.0) * step(s2, 0.0) * step(s3, 0.0);
+    float has_pos = step(0.0, s1) * step(0.0, s2) * step(0.0, s3);
+
+    // Если либо все плюсы, либо все минусы — пиксель внутри. 
+    // max() работает как логическое ИЛИ (поскольку значения 0.0 или 1.0)
+    return max(has_neg, has_pos);
+}
+
+void addTriangle(uint3 id, float2 v1, float2 v2, float2 v3, float4 pos, float mass, inout CellData result)
+{
+    float mask = getTriangleMask(id.x, id.y, v1, v2, v3);
+    
+    result.pos = lerp(result.pos, pos, mask);
+    result.mass = lerp(result.mass, mass, mask);
+}
+
+[numthreads(THREADS, THREADS, 1)]
 void CSInit(uint3 id : SV_DispatchThreadID)
 {
+    // Безопасное отсечение по размеру буфера
+    if ((int) id.x >= _FieldSize.x || (int) id.y >= _FieldSize.y)
+        return;
+
     float randomVal = Hash21(id.xy + Seed);
-    float4 currentPixel = float4(0.0, 0.0, 1.0, 1.0);
     
-    uint xSize;
-    uint ySize;
-    ResultTexture.GetDimensions(xSize, ySize);
-    float halfX = xSize / 2.0;
-    float halfY = ySize / 2.0;
+    // Инициализируем дефолтную ячейку (по умолчанию mass = 1.0)
+    CellData currentCell;
+    currentCell.pos = float4(0.0, 0.0, 0.0, 0.0);
+    currentCell.vel = float4(0.0, 0.0, 0.0, 0.0);
+    currentCell.mass = 1.0;
+    currentCell.isValid = 1.0; // Изначально ячейка валидна
+    
+    float halfX = _FieldSize.x / 2.0;
+    float halfY = _FieldSize.y / 2.0;
     float cirX = halfX * 0.5;
     float cirY = halfY;
     
-    //addCircle(id, cirX, cirY, 1, 1.0, 1.0, currentPixel);
-    addRectangle(id, cirX, cirY - 30.0, 1.0, 60.0, 1.0, 1.0, currentPixel);
-    float gap = 3.0;
-    float spacer = 15.0;
-    addRectangle(id, cirX + 20.0, cirY + 0.5 * spacer + gap, 1.0, (float) ySize, 0.0, -1.0, currentPixel);
-    addRectangle(id, cirX + 20.0, 0.0, 1.0, cirY - 0.5 * spacer - gap, 0.0, -1.0, currentPixel);
-    addRectangle(id, cirX + 20.0, cirY - 0.5 * spacer, 1.0, spacer, 0.0, -1.0, currentPixel);
+    addRectangle(id, cirX, cirY - 90.0, 2.0, 180.0, float4(1.0, 1.0, 1.0, 0.0), 1.0, currentCell);
     
-    ResultTexture[id.xy] = currentPixel;
+    float gap = 9.0;
+    float spacer = 45.0;
+    
+    addRectangle(id, cirX + 20.0, cirY + 0.5 * spacer + gap, 3.0, (float) _FieldSize.y, float4(0, 0, 0, 0), -1.0, currentCell);
+    addRectangle(id, cirX + 20.0, 0.0, 3.0, cirY - 0.5 * spacer - gap, float4(0, 0, 0, 0), -1.0, currentCell);
+    addRectangle(id, cirX + 20.0, cirY - 0.5 * spacer, 3.0, spacer, float4(0, 0, 0, 0), -1.0, currentCell);
+    
+    //addCircle(id, cirX + 170, cirY+100, 120, float4(0, 0, 0, 0), 3, currentCell);
+    addTriangle(id, float2(cirX + 40, cirY - 100), float2(halfX + 55, cirY - 100), float2(halfX + 55, cirY + 100), float4(0, 0, 0, 0), 3, currentCell);
+
+    _OutputBuffer[Idx(id.xy)] = currentCell;
 }
 
 
@@ -194,7 +201,7 @@ void CSInit(uint3 id : SV_DispatchThreadID)
 Texture2D<float4> SourceTexture;
 RWStructuredBuffer<int> boundsBuffer;
 
-[numthreads(8, 8, 1)]
+[numthreads(THREADS, THREADS, 1)]
 void CSFindBounds(uint3 id : SV_DispatchThreadID)
 {
     float val = SourceTexture[id.xy].r;

@@ -1,5 +1,14 @@
 using System.Diagnostics.CodeAnalysis;
+using Unity.Mathematics;
 using UnityEngine;
+
+public enum DebugMode
+{
+    None,
+    NaN,
+    All,
+    LeftBottom
+}
 
 [SuppressMessage("ReSharper", "CheckNamespace")]
 public class SimController : MonoBehaviour
@@ -8,17 +17,23 @@ public class SimController : MonoBehaviour
     public Vector2Int fieldSize = new Vector2Int(512, 512);
     public float stiffness = 1.0f; 
     [Tooltip("Скорость симуляции")]
-    [Range(0f, 30f)]
+    [Range(1f, 30f)]
     public float simSpeed = 1.0f;
+    [Header("FPS Protection")]
+    [Tooltip("Если реальный FPS упадет ниже этого значения, скорость симуляции сбросится в 1")]
+    public float minAllowedFPS = 20f;
     public ComputeShader computeShader;
     public Shader shader;
     public float seed = 1.0f;
     public float cumulativeRatio = 0.002f;
+    public Vector4 ColorCoef = new Vector4(0.95f, 1f, 1.05f, 1f);
+    public int debugStep = 200; 
+    public DebugMode debugMode;
 
-    private const int ThreadSize = 8;
+    private const int ThreadSize = 16;
 
-    private RenderTexture textureA;
-    private RenderTexture textureB;
+    private ComputeBuffer bufferA;
+    private ComputeBuffer bufferB;
     private RenderTexture cumulativeTexture;
     private bool isBufferAInput = true;
     private Material material;
@@ -32,12 +47,24 @@ public class SimController : MonoBehaviour
     private int deltaTimeID;
     private int baseTextureID;
     private int cumulativeRatioID;
+    private int сolorCoefID;
 
-    private Vector4 sizeVector;
     private int threadGroupsX;
     private int threadGroupsY;
 
-    //private int debugInt = 0;
+    private float fpsTimer = 0f;
+    private int frameCount = 0;
+
+    private int debugInt = 0;
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    struct CellData
+    {
+        public Vector4 pos;
+        public Vector4 vel;
+        public float mass;
+        public float isValid;
+    }
 
     private void Start()
     {
@@ -50,18 +77,23 @@ public class SimController : MonoBehaviour
         stiffnessID = Shader.PropertyToID("_Stiffness");
         deltaTimeID = Shader.PropertyToID("_DeltaTime");
         cumulativeRatioID = Shader.PropertyToID("_CumulativeRatio");
+        сolorCoefID = Shader.PropertyToID("_ColorCoef");
         
         baseTextureID = Shader.PropertyToID("_BaseTexture");
 
         threadGroupsX = Mathf.CeilToInt((float)fieldSize.x / ThreadSize);
         threadGroupsY = Mathf.CeilToInt((float)fieldSize.y / ThreadSize);
 
-        textureA = CreateRT();
-        textureB = CreateRT();
-        InitializeRT(textureA);
-        InitializeRT(textureB);
-        cumulativeTexture = CreateRT();
-        sizeVector = new Vector4(fieldSize.x, fieldSize.y, 0, 0);
+        bufferA = CreateBuffer();
+        bufferB = CreateBuffer();
+        InitializeSimulation(bufferA);
+        cumulativeTexture = new RenderTexture(fieldSize.x, fieldSize.y, 0, RenderTextureFormat.ARGBFloat);
+
+        cumulativeTexture.enableRandomWrite = true;
+
+        cumulativeTexture.filterMode = FilterMode.Point;
+
+        cumulativeTexture.Create();
 
         if (TryGetComponent<MeshRenderer>(out var meshRenderer))
         {
@@ -73,20 +105,55 @@ public class SimController : MonoBehaviour
         }
     }
 
-    private void FixedUpdate()
-    { 
-        RenderTexture input = isBufferAInput ? textureA : textureB;
-        RenderTexture output = isBufferAInput ? textureB : textureA;
-        isBufferAInput = !isBufferAInput;
+    private void Update()
+    {
+        fpsTimer += Time.unscaledDeltaTime; // unscaled защищает от влияния Time.timeScale
+        frameCount++;
 
-        computeShader.SetTexture(mainKernelID, inputTexID, input);
-        computeShader.SetTexture(mainKernelID, outputTexID, output);
-        computeShader.SetTexture(mainKernelID, cumulativeTexID, cumulativeTexture);
-        computeShader.SetVector(fieldSizeID, sizeVector);
+        if (fpsTimer >= 0.5f)
+        {
+            float currentFPS = frameCount / fpsTimer;
+
+            if (currentFPS < minAllowedFPS && simSpeed > 1)
+            {
+                simSpeed -= 1;
+                Debug.LogWarning($"[FPS Protection] Симуляция сброшена на скорость {simSpeed:F1}х! Текущий FPS: {currentFPS:F1}");
+            }
+            fpsTimer = 0f;
+            frameCount = 0;
+        }
+    }
+
+    private void FixedUpdate()
+    {
+        computeShader.SetInts(fieldSizeID, fieldSize.x, fieldSize.y);
         computeShader.SetFloat(stiffnessID, stiffness);
-        computeShader.SetFloat(deltaTimeID, Time.fixedDeltaTime * simSpeed);
         computeShader.SetFloat(cumulativeRatioID, cumulativeRatio);
-        computeShader.Dispatch(mainKernelID, threadGroupsX, threadGroupsY, 1);
+        computeShader.SetVector(сolorCoefID, ColorCoef);
+        computeShader.SetFloat(deltaTimeID, Time.fixedDeltaTime);
+        computeShader.SetTexture(mainKernelID, cumulativeTexID, cumulativeTexture);
+
+        for (int i = 0; i < simSpeed; i++)
+        {
+            ComputeBuffer input = isBufferAInput ? bufferA : bufferB;
+            ComputeBuffer output = isBufferAInput ? bufferB : bufferA;
+            computeShader.SetBuffer(mainKernelID, inputTexID, input);
+            computeShader.SetBuffer(mainKernelID, outputTexID, output);
+            computeShader.Dispatch(mainKernelID, threadGroupsX, threadGroupsY, 1);
+            isBufferAInput = !isBufferAInput;
+
+            /*if (debugMode != DebugMode.None && debugStep > 0 && debugInt % debugStep == 0)
+            {
+                Debug.Log($"step {debugInt}");
+                Debug.Log("===START===");
+                Debug.Log(":::input:::");
+                DebugMinMax(input);
+                Debug.Log(":::output:::");
+                DebugMinMax(output);
+                Debug.Log("===END===");
+            }
+            debugInt++;*/
+        }
 
         /*int[] initialBounds = new int[] { int.MaxValue, int.MinValue };
         boundsBuffer.SetData(initialBounds);
@@ -96,90 +163,87 @@ public class SimController : MonoBehaviour
         computeShader.Dispatch(kernel, fieldSize.x / 8, fieldSize.y / 8, 1);
         */
         material.SetTexture(baseTextureID, cumulativeTexture);
-
-        /*if (debugInt % 200 == 0)
-        {
-            Debug.Log("===START===");
-            Debug.Log("input");
-            DebugMinMax(input);
-            Debug.Log("output");
-            DebugMinMax(output);
-            Debug.Log("===END===");
-        }
-        //Debug.Log($"step {debugInt}");
-        debugInt++;*/
     }
 
 
-    void DebugMinMax(RenderTexture rt)
+    void DebugMinMax(ComputeBuffer buffer)
     {
-        // 1. Сохраняем текущую активную RenderTexture Unity
-        RenderTexture previousActive = RenderTexture.active;
+        if (debugMode == DebugMode.None)
+            return;
+        // 1. Создаем массив на CPU точно такого же размера, как буфер
+        int totalCells = fieldSize.x * fieldSize.y;
+        CellData[] cpuBuffer = new CellData[totalCells];
 
-        // 2. Делаем нашу RenderTexture активной для чтения
-        RenderTexture.active = rt;
+        // 2. Скачиваем данные из видеокарты в наш массив (Внимание: эта операция блокирует поток и вызывает фриз)
+        buffer.GetData(cpuBuffer);
 
-        // 3. Создаем временную CPU-текстуру нужного формата
-        Texture2D tempTex = new Texture2D(rt.width, rt.height, TextureFormat.RGBAFloat, false);
-
-        // 4. Копируем данные из active RenderTexture в Texture2D (вот тут происходит фриз)
-        tempTex.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0);
-        tempTex.Apply();
-
-        // 5. Восстанавливаем старую активную текстуру
-        RenderTexture.active = previousActive;
-        float min = float.MaxValue; float max = float.MinValue;
-        // 6. Читаем нужный пиксель и забираем R канал
-        for (int i = 0; i < fieldSize.x; i++)
+        float min = float.MaxValue;
+        float max = float.MinValue;
+        bool flag = false;
+        if (debugMode == DebugMode.LeftBottom)
         {
-            for (int j = 0; j < fieldSize.y; j++)
-            {
-                Color col = tempTex.GetPixel(i, j);
-                float val = col.r;
-                //if (i % 128 == 0 || j % 128 == 0 ) 
-                //    Debug.Log($"x: {col.r}, v:{col.g}, m:{col.b}");
-                max = Mathf.Max(max, val);
-                min = Mathf.Min(min, val);
-            }
+            totalCells = 10;
         }
 
-        // Очищаем за собой память CPU
-        Destroy(tempTex);
+        // 3. Пробегаемся по плоскому массиву
+        for (int i = 0; i < totalCells; i++)
+        {
+            // Достаем структуру ячейки
+            CellData cell = cpuBuffer[i];
 
-        Debug.Log($"min: {min}, max:{max}");
+            // Берем координату позиции (например, по оси X, как мы настраивали в CSInit)
+            float val = cell.pos.x;
+
+            // Ищем минимум и максимум
+            max = Mathf.Max(max, val);
+            min = Mathf.Min(min, val);
+
+            bool invalid =
+                            !float.IsFinite(cell.pos.x) ||
+                            !float.IsFinite(cell.pos.y) ||
+                            !float.IsFinite(cell.pos.z) ||
+
+                            !float.IsFinite(cell.vel.x) ||
+                            !float.IsFinite(cell.vel.y) ||
+                            !float.IsFinite(cell.vel.z);
+
+            if (debugMode != DebugMode.NaN)
+            {
+                invalid = true;
+            }
+            if (invalid)
+            {
+                flag = true;
+                Debug.Log($"x: {cell.pos}, v:{cell.vel}, m:{cell.mass}");
+            }
+        }
+        if (!flag)
+            Debug.Log($"Всё ок");
     }
 
     private void OnDestroy()
     {
-        if (textureA != null)
-        {
-            textureA.Release();
-            Destroy(textureA);
-        }
-
-        if (textureB != null)
-        {
-            textureB.Release();
-            Destroy(textureB);
-        }
+        bufferA?.Release();
+        bufferB?.Release();
     }
 
-    private RenderTexture CreateRT()
+    private ComputeBuffer CreateBuffer()
     {
-        RenderTexture rt = new RenderTexture(fieldSize.x, fieldSize.y, 0, RenderTextureFormat.ARGBFloat);
-        rt.enableRandomWrite = true;
-        rt.filterMode = FilterMode.Point;
-        rt.Create();
-        //DebugMinMax(rt);
-        return rt;
+        int totalCells = fieldSize.x * fieldSize.y;
+        // float4 pos (16 байт) + float4 vel (16 байт) + float mass (4 байта) + float isValid (4 байта) = 40 байта = 10 float.
+        int stride = sizeof(float) * 10;
+        ComputeBuffer buffer = new ComputeBuffer(totalCells, stride, ComputeBufferType.Structured);
+        return buffer;
     }
 
-    private void InitializeRT(RenderTexture rt)
+    void InitializeSimulation(ComputeBuffer buffer)
     {
         int initKernel = computeShader.FindKernel("CSInit");
-
-        computeShader.SetTexture(initKernel, "ResultTexture", rt);
+        computeShader.SetInts(fieldSizeID, fieldSize.x, fieldSize.y);
         computeShader.SetFloat("Seed", seed);
+        computeShader.SetBuffer(initKernel, "_OutputBuffer", buffer);
         computeShader.Dispatch(initKernel, threadGroupsX, threadGroupsY, 1);
+        DebugMinMax(buffer);
+        Debug.Log("~~~~~~");
     }
 }

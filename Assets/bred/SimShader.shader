@@ -50,8 +50,8 @@ Shader "Custom/SimShader"
             half4 frag(v2f i) : SV_Target
             {
                 float4 c = SAMPLE_TEXTURE2D(_BaseTexture, sampler_BaseTexture, i.uv);
-                if (c.b < 0.0) return half4(0.0, 0.0, 1.0, 1.0);
-                return half4(c.r, c.r, c.r, 1.0);
+                if (c.a < 0.0) return half4(0.0, 0.0, 1.0, 1.0);
+                return half4(c.r, c.g, c.b, 1.0);
             }
             ENDHLSL
         }
