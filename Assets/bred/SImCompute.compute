@@ -12,16 +12,16 @@ struct CellData
 
 StructuredBuffer<CellData> _Input;
 RWStructuredBuffer<CellData> _Output;
-RWTexture2D<float4> _Cumulative;
+RWStructuredBuffer<float4> _CumulativeBuffer;
 
 int2 _FieldSize;
 float _Stiffness;
 float _DeltaTime;
-float _CumulativeRatio;
 float4 _ColorCoef;
+float _CumulativeRatio;
 
 #define NEI_COUNT 4
-#define BORDER 16.0
+#define BORDER 32.0
 #define ABSORPTION_STR 0.25
 
 int Idx(uint2 id)
@@ -50,8 +50,9 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     CellData cur = _Input[Idx(id.xy)];
     CellData newCell = cur;
     
-    //_Cumulative[id.xy] = float4(cur.pos.rgb, cur.mass);
-    _Cumulative[id.xy] += float4(max(cur.pos.rgb, 0) * _CumulativeRatio, cur.mass);
+    
+    //_CumulativeBuffer[Idx(id.xy)] = float4(cur.pos.rgb, cur.mass);
+    _CumulativeBuffer[Idx(id.xy)] += float4(max(cur.pos.rgb, 0) * _CumulativeRatio, cur.mass);
     
     float isWave = step(0, cur.mass);
     
@@ -79,6 +80,22 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     
     _Output[Idx(id.xy)] = newCell;
 }
+
+
+#pragma kernel CSAccum
+
+RWTexture2D<float4> _CumulativeTexture;
+
+[numthreads(THREADS, THREADS, 1)]
+void CSAccum(uint3 id : SV_DispatchThreadID)
+{
+    if ((int) id.x >= _FieldSize.x || (int) id.y >= _FieldSize.y)
+        return;
+    
+    CellData cur = _Output[Idx(id.xy)];
+    _CumulativeTexture[id.xy] = _CumulativeBuffer[Idx(id.xy)];
+}
+
 
 #pragma kernel CSInit
 
@@ -159,6 +176,265 @@ void addTriangle(uint3 id, float2 v1, float2 v2, float2 v3, float4 pos, float ma
     result.mass = lerp(result.mass, mass, mask);
 }
 
+void addLightBeam(uint3 id, float2 origin, float2 dir, float width, float lenght, float freq, inout CellData result)
+{
+    float2 p = float2((float) id.x, (float) id.y);
+    
+    float2 N = normalize(dir);
+    float2 tangent = float2(-N.y, N.x);
+    
+    // Проекция точки на ось луча (расстояние вдоль луча)
+    float distanceAlong = dot(p - origin, N);
+    // Проекция точки поперек луча (расстояние от центральной линии луча)
+    float distanceAcross = dot(p - origin, tangent);
+    
+    // 1. Маска ширины луча (ограничиваем луч по бокам плавным затуханием)
+    // Используем гладкий шаг smoothstep вместо жесткого step, чтобы не было "зубцов"
+    float edgeMask = smoothstep(width, width - 5.0, abs(distanceAcross));
+    
+    // Ограничиваем луч сзади (чтобы он не светил назад из источника)
+    float behindMask = step(0.0, distanceAlong);
+    float forwardMask = step(distanceAlong, lenght);
+    float finalMask = edgeMask * forwardMask * behindMask;
+    
+    // 2. Сама волна (синусоида)
+    // Форма позиции: синус от расстояния вдоль луча
+    float wavePos = sin(distanceAlong * freq);
+    
+    // Начальная скорость: косинус (производная синуса), завязанный на направление.
+    // Именно этот косинус заставит волну ЛЕТЕТЬ вперед, а не просто стоять и пульсировать!
+    float waveVel = -cos(distanceAlong * freq) * freq;
+    
+    // Плавное смешивание (накладываем пучок поверх того, что уже было в буфере)
+    result.pos = lerp(result.pos, wavePos, finalMask);
+    result.vel = lerp(result.vel, waveVel, finalMask);
+    
+    result.mass = 1.0;
+}
+
+void addGaussianBeam(uint3 id, float2 origin, float2 dir, float width, float length, float freq, float waveSpeed, inout CellData result)
+{
+    float2 p = float2((float) id.x, (float) id.y);
+    float2 N = normalize(dir);
+    float2 tangent = float2(-N.y, N.x);
+    
+    float2 toCell = p - origin;
+    float distanceAlong = dot(toCell, N);
+    float distanceAcross = dot(toCell, tangent);
+    
+    // 1. Поперечный профиль луча (ФУНКЦИЯ ГАУССА)
+    // Никаких косинусов! Только плавное спадание энергии от центра к краям.
+    // Это гарантирует, что луч не будет фонить в стороны "шахматкой".
+    float crossProfile = exp(-(distanceAcross * distanceAcross) / (width * width));
+    
+    // 2. Продольный профиль (Ограничиваем пучок спереди и сзади)
+    float longProfile = exp(-(distanceAlong * distanceAlong) / (length * length));
+    
+    // Итоговая маска (форма "таблетки" или лазерного сгустка)
+    float envelope = crossProfile * longProfile;
+    
+    // 3. Сама волна внутри сгустка
+    float phase = distanceAlong * freq;
+    float wavePos = sin(phase);
+    
+    // 4. СКОРОСТЬ (Магия направленности)
+    // Чтобы волна летела ТОЛЬКО вперед, начальная скорость должна быть равна:
+    // минус производная фазы, умноженная на физическую скорость волны в среде (c).
+    float waveVel = -cos(phase) * freq * waveSpeed;
+    
+    // Накладываем результат (домножаем на envelope, чтобы края сгустка сошли на нет)
+    result.pos += wavePos * envelope;
+    result.vel += waveVel * envelope;
+    
+    // Делаем среду стабильной внутри луча
+    result.mass = 1.0;
+}
+
+void addLens1(uint3 id, float2 center, float R, float thickness, float power, inout CellData result)
+{
+    float2 p = float2((float) id.x, (float) id.y);
+    
+    // Вычисляем центры двух сфер, которые при пересечении образуют линзу
+    // Сферы смещены влево и вправо от центра линзы
+    float offset = R - (thickness * 0.5);
+    float2 centerLeft = center - float2(offset, 0.0);
+    float2 centerRight = center + float2(offset, 0.0);
+    
+    // Расстояние от текущей ячейки до центров этих сфер
+    float distToLeft = distance(p, centerLeft);
+    float distToRight = distance(p, centerRight);
+    
+    // Если ячейка находится И внутри левой сферы, И внутри правой сферы — она внутри линзы!
+    // (Для рассеивающей линзы знак инвертируется, но пока сделаем классическую собирающую)
+    if (distToLeft < R && distToRight < R)
+    {
+        // Считаем плавное сглаживание краев линзы (антиалиасинг), чтобы не было ступенек
+        float edgeLeft = smoothstep(R, R - 1.0, distToLeft);
+        float edgeRight = smoothstep(R, R - 1.0, distToRight);
+        float lensMask = edgeLeft * edgeRight;
+        
+        // Изменяем массу среды (коэффициент преломления). 
+        // Чем больше масса, тем медленнее идет волна -> тем сильнее преломление.
+        // power = 1.0 означает обычную среду, power = 2.0 — среда в 2 раза плотнее.
+        result.mass = lerp(result.mass, power, lensMask);
+    }
+}
+
+void addConvexLens(uint3 id, float2 center, float height, float focus, inout CellData result)
+{
+    float2 p = float2((float) id.x, (float) id.y);
+    float n = 3.0; // Твой коэффициент преломления
+    
+    // 1. Считаем честный радиус сфер по твоей формуле
+    float R = 2.0 * (n - 1.0) * focus;
+    
+    // Половина высоты линзы (апертура)
+    float h = height * 0.5;
+    
+    R = max(R, h + 0.01);
+    
+    // 2. Ищем толщину половинки линзы (стрелу сегмента s), используя половину высоты h
+    float s = R - sqrt(R * R - h * h);
+    
+    // Находим смещение центров сфер относительно центра линзы
+    float offset = R - s; // В исходной формуле для полной толщины (2*s) offset = R - (2*s * 0.5), что равно R - s
+    float2 centerLeft = center - float2(offset, 0.0);
+    float2 centerRight = center + float2(offset, 0.0);
+    
+    // Проверяем попадание ячейки внутрь линзы
+    float distToLeft = distance(p, centerLeft);
+    float distToRight = distance(p, centerRight);
+    
+    if (distToLeft < R && distToRight < R)
+    {
+        // Плавное сглаживание краев пикселей
+        float edgeLeft = smoothstep(R, R - 1.2, distToLeft);
+        float edgeRight = smoothstep(R, R - 1.2, distToRight);
+        float lensMask = edgeLeft * edgeRight;
+        
+        result.mass = lerp(result.mass, n, lensMask);
+    }
+}
+
+void addAsphericLens(uint3 id, float2 center, float height, float focus, inout CellData result)
+{
+        
+    float2 p = float2((float) id.x, (float) id.y);
+    float n = 2.0; // Коэффициент преломления
+    
+    float dx = p.x - center.x;
+    float dy = p.y - center.y;
+    
+    float halfHeight = height * 0.5;
+    if (abs(dy) > halfHeight)
+        return;
+    
+    float f_side = focus * 2.0;
+    float k = n / (n + 1.0);
+    
+    // 2. ИСПРАВЛЕНИЕ ГЕОМЕТРИИ ЛИНЗЫ
+    // Формула гиперболы дает "стрелу прогиба" (sagitta) — отклонение от плоской поверхности.
+    // В центре (dy = 0) sagitta равна 0, на краях — максимальна.
+    float sagitta = sqrt(f_side * f_side + (dy * dy) * k) - f_side;
+    
+    // Вычисляем максимальный прогиб на краю линзы
+    float maxSagitta = sqrt(f_side * f_side + (halfHeight * halfHeight) * k) - f_side;
+    
+    // Чтобы линза была ВЫПУКЛОЙ (толстой в центре и острой по краям),
+    // нужно из максимальной толщины вычесть текущий прогиб.
+    float halfThickness = maxSagitta - sagitta;
+    
+    // Добавляем минимальную базовую толщину (например, 1 пиксель), 
+    // чтобы края линзы не исчезали полностью из-за погрешностей сетки
+    halfThickness += 1.0;
+    
+    // Проверяем, находится ли пиксель внутри линзы
+    float distToEdge = halfThickness - abs(dx);
+    
+    if (distToEdge > 0.0)
+    {
+        // Сглаживание по профилю линзы и на торцах
+        float edgeX = smoothstep(0.0, 1.2, distToEdge);
+        float edgeY = smoothstep(halfHeight, halfHeight - 1.2, abs(dy));
+        float lensMask = edgeX * edgeY;
+        
+        result.mass = lerp(result.mass, n, lensMask);
+    }
+}
+
+void addConcaveLens(uint3 id, float2 center, float height, float focus, inout CellData result)
+{
+        
+    float2 p = float2((float) id.x, (float) id.y);
+    float n = 2.0; // Коэффициент преломления
+    
+    float dx = p.x - center.x;
+    float dy = p.y - center.y;
+    
+    float halfHeight = height * 0.5;
+    if (abs(dy) > halfHeight)
+        return;
+    
+    // Мнимый фокус для каждой из сторон
+    float f_side = focus * 2.0;
+    float k = n / (n + 1.0);
+    
+    // Вычисляем прогиб гиперболы (сагитту). В центре (dy=0) она равна 0.
+    float sagitta = sqrt(f_side * f_side + (dy * dy) * k) - f_side;
+    
+    // Для вогнутой линзы sagitta — это и есть наша полутолщина!
+    // В самом центре линза будет иметь толщину baseThickness.
+    float baseThickness = 10.0; // Минимальная толщина в центре (в пикселях)
+    float halfThickness = sagitta + baseThickness;
+    
+    // Проверяем, находится ли пиксель внутри линзы по горизонтали
+    float distToEdge = halfThickness - abs(dx);
+    
+    if (distToEdge > 0.0)
+    {
+        // Сглаживание по профилю (X) и на торцах (Y)
+        float edgeX = smoothstep(0.0, 1.2, distToEdge);
+        float edgeY = smoothstep(halfHeight, halfHeight - 1.2, abs(dy));
+        float lensMask = edgeX * edgeY;
+        
+        result.mass = lerp(result.mass, n, lensMask);
+    }
+}
+
+void addParabolicMirror(uint3 id, float2 center, float size, float focus, float thickness, float angle, inout CellData result)
+{        
+    float2 p = float2((float) id.x, (float) id.y);
+    
+    float dx = p.x - center.x;
+    float dy = p.y - center.y;
+    
+    float rad = radians(angle);
+    float cosA = cos(rad);
+    float sinA = sin(rad);
+    
+    float rotX = dx * cosA + dy * sinA;
+    float rotY = -dx * sinA + dy * cosA;
+    
+    float halfSize = size * 0.5;
+    if (abs(rotY) > halfSize)
+        return;
+        
+    // 5. Уравнение параболы в повернутых координатах
+    // Ветви по-прежнему смотрят "навстречу" локальной оси X
+    float targetX = -(rotY * rotY) / (4.0 * focus);
+    
+    // 6. Расстояние от пикселя до кривой параболы по повернутой оси X
+    float distToCurve = abs(rotX - targetX);
+    
+    // 7. Проверяем попадание пикселя в толщину
+    float halfThickness = thickness * 0.5;
+    
+    if (distToCurve <= halfThickness)
+    {
+        result.mass = -1.0;
+    }
+}
+
 [numthreads(THREADS, THREADS, 1)]
 void CSInit(uint3 id : SV_DispatchThreadID)
 {
@@ -175,22 +451,33 @@ void CSInit(uint3 id : SV_DispatchThreadID)
     currentCell.mass = 1.0;
     currentCell.isValid = 1.0; // Изначально ячейка валидна
     
-    float halfX = _FieldSize.x / 2.0;
-    float halfY = _FieldSize.y / 2.0;
+    float X = _FieldSize.x;
+    float Y = _FieldSize.y;
+    
+    float halfX = X * 0.5;
+    float halfY = Y * 0.5;
     float cirX = halfX * 0.5;
     float cirY = halfY;
     
-    addRectangle(id, cirX, cirY - 90.0, 2.0, 180.0, float4(1.0, 1.0, 1.0, 0.0), 1.0, currentCell);
+    //addGaussianBeam(id, float2(X * 0.25, Y * 0.25), float2(1, 0), max(5, 0.03 * Y), max(5, 0.03 * Y), 0.5, 1, currentCell);
+    //addCircle(id, halfX, halfY, 0.25 * X, float4(0, 0, 0, 0), 2, currentCell);
     
-    float gap = 9.0;
-    float spacer = 45.0;
+    //addRectangle(id, 0.25 * X, 0.4 * Y, max(1, 0.002 * X), 0.2 * Y, float4(1.0, 1.0, 1.0, 0.0), 1.0, currentCell);
     
-    addRectangle(id, cirX + 20.0, cirY + 0.5 * spacer + gap, 3.0, (float) _FieldSize.y, float4(0, 0, 0, 0), -1.0, currentCell);
-    addRectangle(id, cirX + 20.0, 0.0, 3.0, cirY - 0.5 * spacer - gap, float4(0, 0, 0, 0), -1.0, currentCell);
-    addRectangle(id, cirX + 20.0, cirY - 0.5 * spacer, 3.0, spacer, float4(0, 0, 0, 0), -1.0, currentCell);
+    float gap = max(0.009 * X, 1);
+    float spacer = max(2, 0.045);
     
-    //addCircle(id, cirX + 170, cirY+100, 120, float4(0, 0, 0, 0), 3, currentCell);
-    addTriangle(id, float2(cirX + 40, cirY - 100), float2(halfX + 55, cirY - 100), float2(halfX + 55, cirY + 100), float4(0, 0, 0, 0), 3, currentCell);
+    /*addRectangle(id, 0.27 * X, Y * 0.5 * spacer + gap, 3.0, (float) _FieldSize.y, float4(0, 0, 0, 0), -1.0, currentCell);
+    addRectangle(id, 0.27 * X0, 0.0, 3.0, Y * 0.5 - 0.5 * spacer - gap, float4(0, 0, 0, 0), -1.0, currentCell);
+    addRectangle(id, 0.27 * X, Y * 0.5 - 0.5 * spacer, 3.0, spacer, float4(0, 0, 0, 0), -1.0, currentCell);*/
+    
+    //addGaussianBeam(id, float2(0.1 * X, 0.5 * Y), float2(1, 0), max(5, 0.045 * Y), max(5, 0.045 * Y), 0.5, 1, currentCell);
+    //addTriangle(id, float2(0.30 * X, 0.3 * Y), float2(0.6 * X, 0.3 * Y), float2(0.45 * X, 0.8 * Y), float4(0, 0, 0, 0), 2, currentCell);
+    //addConcaveLens(id, float2(0.45 * X, halfY), Y * 0.3, Y * 0.25, currentCell);
+    
+    addGaussianBeam(id, float2(0.1 * X, 0.5 * Y), float2(1, 0), max(5, 0.1 * Y), max(5, 0.1 * Y), 0.5, 1, currentCell);
+    addAsphericLens(id, float2(0.4 * X, 0.5 * Y), Y * 0.5, Y * 0.1, currentCell);
+    //addParabolicMirror(id, float2(halfX, halfY), Y * 0.3, Y * 0.15, 5, 45, currentCell);
 
     _OutputBuffer[Idx(id.xy)] = currentCell;
 }

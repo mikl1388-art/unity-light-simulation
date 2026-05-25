@@ -1,6 +1,8 @@
 using System.Diagnostics.CodeAnalysis;
+using TMPro;
 using Unity.Mathematics;
 using UnityEngine;
+using UnityEngine.UI;
 
 public enum DebugMode
 {
@@ -17,10 +19,9 @@ public class SimController : MonoBehaviour
     public Vector2Int fieldSize = new Vector2Int(512, 512);
     public float stiffness = 1.0f; 
     [Tooltip("Скорость симуляции")]
-    [Range(1f, 30f)]
-    public float simSpeed = 1.0f;
-    [Header("FPS Protection")]
-    [Tooltip("Если реальный FPS упадет ниже этого значения, скорость симуляции сбросится в 1")]
+    [Range(1, 30)]
+    public int simSpeed = 1;
+    [Tooltip("Если реальный FPS упадет ниже этого значения, скорость симуляции уменьшится вдвое")]
     public float minAllowedFPS = 20f;
     public ComputeShader computeShader;
     public Shader shader;
@@ -30,17 +31,25 @@ public class SimController : MonoBehaviour
     public int debugStep = 200; 
     public DebugMode debugMode;
 
+    [SerializeField] private TextMeshProUGUI debugText;
+    [SerializeField] private Slider speedSlider;
+
     private const int ThreadSize = 16;
+
+    private int maxSpeed;
 
     private ComputeBuffer bufferA;
     private ComputeBuffer bufferB;
+    private ComputeBuffer cumulativeBuffer;
     private RenderTexture cumulativeTexture;
     private bool isBufferAInput = true;
     private Material material;
 
     private int mainKernelID;
-    private int inputTexID;
-    private int outputTexID;
+    private int accumKernelID;
+    private int inputBufferID;
+    private int outputBufferID;
+    private int cumulativeBufferID;
     private int cumulativeTexID;
     private int fieldSizeID;
     private int stiffnessID;
@@ -54,6 +63,7 @@ public class SimController : MonoBehaviour
 
     private float fpsTimer = 0f;
     private int frameCount = 0;
+    private float badTime = 0f;
 
     private int debugInt = 0;
 
@@ -66,13 +76,36 @@ public class SimController : MonoBehaviour
         public float isValid;
     }
 
+    public void ChangeSpeed(float newSpeed)
+    {
+        simSpeed = Mathf.RoundToInt(newSpeed);
+    }
+
+    public static float MapShiftedHyperbola(float x, float x1, float x2, float y1, float y2)
+    {
+        // 1. Находим величину сдвига по оси X (коэффициент c)
+        float c = (x2 * y2 - x1 * y1) / (y1 - y2);
+
+        // 2. Находим константу k
+        float k = y1 * (x1 + c);
+
+        // 3. Считаем итоговый Y для нашего X
+        return k / (x + c);
+    }
+
     private void Start()
     {
+        gameObject.transform.localScale = new Vector3((float)fieldSize.x / fieldSize.y, 1f, 1f);
+        maxSpeed = (int)MapShiftedHyperbola(fieldSize.x * fieldSize.y, 600 * 600, 1200 * 1200, 60, 15);
+        speedSlider.maxValue = maxSpeed;
+
         material = new Material(shader);
         mainKernelID = computeShader.FindKernel("CSMain");
-        inputTexID = Shader.PropertyToID("_Input");
-        outputTexID = Shader.PropertyToID("_Output");
-        cumulativeTexID = Shader.PropertyToID("_Cumulative");
+        accumKernelID = computeShader.FindKernel("CSAccum");
+        inputBufferID = Shader.PropertyToID("_Input");
+        outputBufferID = Shader.PropertyToID("_Output");
+        cumulativeBufferID = Shader.PropertyToID("_CumulativeBuffer");
+        cumulativeTexID = Shader.PropertyToID("_CumulativeTexture");
         fieldSizeID = Shader.PropertyToID("_FieldSize");
         stiffnessID = Shader.PropertyToID("_Stiffness");
         deltaTimeID = Shader.PropertyToID("_DeltaTime");
@@ -87,13 +120,16 @@ public class SimController : MonoBehaviour
         bufferA = CreateBuffer();
         bufferB = CreateBuffer();
         InitializeSimulation(bufferA);
+
         cumulativeTexture = new RenderTexture(fieldSize.x, fieldSize.y, 0, RenderTextureFormat.ARGBFloat);
-
         cumulativeTexture.enableRandomWrite = true;
-
         cumulativeTexture.filterMode = FilterMode.Point;
-
         cumulativeTexture.Create();
+
+        int totalCells = fieldSize.x * fieldSize.y;
+        int stride = sizeof(float) * 4; // float4 pos = 16 байт = 4 float.
+        cumulativeBuffer = new ComputeBuffer(totalCells, stride, ComputeBufferType.Structured);
+        cumulativeBuffer.SetData(new byte[cumulativeBuffer.count * 16]);
 
         if (TryGetComponent<MeshRenderer>(out var meshRenderer))
         {
@@ -113,11 +149,22 @@ public class SimController : MonoBehaviour
         if (fpsTimer >= 0.5f)
         {
             float currentFPS = frameCount / fpsTimer;
+            UpdateDebugText(currentFPS, badTime);
 
             if (currentFPS < minAllowedFPS && simSpeed > 1)
             {
-                simSpeed -= 1;
-                Debug.LogWarning($"[FPS Protection] Симуляция сброшена на скорость {simSpeed:F1}х! Текущий FPS: {currentFPS:F1}");
+                badTime += 0.5f;
+            }
+            else
+            {
+                badTime = math.max(0, badTime - 0.5f);
+            }
+            if (badTime > 2f)
+            {
+                simSpeed /= 2;
+                speedSlider.value = simSpeed;
+                Debug.LogWarning($"[FPS Protection] Симуляция сброшена на скорость {simSpeed}х! Текущий FPS: {currentFPS:F1}");
+                badTime = 0f;
             }
             fpsTimer = 0f;
             frameCount = 0;
@@ -131,14 +178,22 @@ public class SimController : MonoBehaviour
         computeShader.SetFloat(cumulativeRatioID, cumulativeRatio);
         computeShader.SetVector(сolorCoefID, ColorCoef);
         computeShader.SetFloat(deltaTimeID, Time.fixedDeltaTime);
-        computeShader.SetTexture(mainKernelID, cumulativeTexID, cumulativeTexture);
 
-        for (int i = 0; i < simSpeed; i++)
+        ComputeBuffer input = isBufferAInput ? bufferA : bufferB;
+        ComputeBuffer output = isBufferAInput ? bufferB : bufferA;
+        computeShader.SetBuffer(mainKernelID, inputBufferID, input);
+        computeShader.SetBuffer(mainKernelID, outputBufferID, output);
+        computeShader.SetBuffer(mainKernelID, cumulativeBufferID, cumulativeBuffer);
+        computeShader.SetBuffer(accumKernelID, cumulativeBufferID, cumulativeBuffer);
+        computeShader.Dispatch(mainKernelID, threadGroupsX, threadGroupsY, 1);
+        isBufferAInput = !isBufferAInput;
+
+        for (int i = 0; i < simSpeed-1; i++)
         {
-            ComputeBuffer input = isBufferAInput ? bufferA : bufferB;
-            ComputeBuffer output = isBufferAInput ? bufferB : bufferA;
-            computeShader.SetBuffer(mainKernelID, inputTexID, input);
-            computeShader.SetBuffer(mainKernelID, outputTexID, output);
+            input = isBufferAInput ? bufferA : bufferB;
+            output = isBufferAInput ? bufferB : bufferA;
+            computeShader.SetBuffer(mainKernelID, inputBufferID, input);
+            computeShader.SetBuffer(mainKernelID, outputBufferID, output);
             computeShader.Dispatch(mainKernelID, threadGroupsX, threadGroupsY, 1);
             isBufferAInput = !isBufferAInput;
 
@@ -162,6 +217,9 @@ public class SimController : MonoBehaviour
         computeShader.SetBuffer(kernel, "boundsBuffer", boundsBuffer);
         computeShader.Dispatch(kernel, fieldSize.x / 8, fieldSize.y / 8, 1);
         */
+        computeShader.SetBuffer(accumKernelID, outputBufferID, output);
+        computeShader.SetTexture(accumKernelID, cumulativeTexID, cumulativeTexture);
+        computeShader.Dispatch(accumKernelID, threadGroupsX, threadGroupsY, 1);
         material.SetTexture(baseTextureID, cumulativeTexture);
     }
 
@@ -225,6 +283,7 @@ public class SimController : MonoBehaviour
     {
         bufferA?.Release();
         bufferB?.Release();
+        cumulativeBuffer?.Release();
     }
 
     private ComputeBuffer CreateBuffer()
@@ -236,7 +295,7 @@ public class SimController : MonoBehaviour
         return buffer;
     }
 
-    void InitializeSimulation(ComputeBuffer buffer)
+    private void InitializeSimulation(ComputeBuffer buffer)
     {
         int initKernel = computeShader.FindKernel("CSInit");
         computeShader.SetInts(fieldSizeID, fieldSize.x, fieldSize.y);
@@ -244,6 +303,15 @@ public class SimController : MonoBehaviour
         computeShader.SetBuffer(initKernel, "_OutputBuffer", buffer);
         computeShader.Dispatch(initKernel, threadGroupsX, threadGroupsY, 1);
         DebugMinMax(buffer);
-        Debug.Log("~~~~~~");
+    }
+
+    private void UpdateDebugText(float fps, float badTime)
+    {
+        if (debugText != null)
+        {
+            // Строка интерполяции ($): объединяем FPS и simSpeed в один текст
+            // \n переносит скорость на новую строку
+            debugText.text = $"FPS: {fps:F1}\nSpeed: {simSpeed}x\nBad time: {badTime}";
+        }
     }
 }
