@@ -51,8 +51,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     CellData newCell = cur;
     
     
-    //_CumulativeBuffer[Idx(id.xy)] = float4(cur.pos.rgb, cur.mass);
-    _CumulativeBuffer[Idx(id.xy)] += float4(max(cur.pos.rgb, 0) * _CumulativeRatio, cur.mass);
+    _CumulativeBuffer[Idx(id.xy)] = float4(cur.pos.rgb, cur.mass);
+    //_CumulativeBuffer[Idx(id.xy)] += float4(max(cur.pos.rgb, 0) * _CumulativeRatio, cur.mass);
     
     float isWave = step(0, cur.mass);
     

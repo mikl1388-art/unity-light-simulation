@@ -83,13 +83,8 @@ public class SimController : MonoBehaviour
 
     public static float MapShiftedHyperbola(float x, float x1, float x2, float y1, float y2)
     {
-        // 1. Находим величину сдвига по оси X (коэффициент c)
         float c = (x2 * y2 - x1 * y1) / (y1 - y2);
-
-        // 2. Находим константу k
         float k = y1 * (x1 + c);
-
-        // 3. Считаем итоговый Y для нашего X
         return k / (x + c);
     }
 
