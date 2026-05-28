@@ -1,5 +1,8 @@
+// ReSharper disable CppInconsistentNaming
+
 #define THREADS 16
 
+#pragma region CSMain
 #pragma kernel CSMain
 
 struct CellData
@@ -80,8 +83,9 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     
     _Output[Idx(id.xy)] = newCell;
 }
+#pragma endregion
 
-
+#pragma region CSAccum
 #pragma kernel CSAccum
 
 RWTexture2D<float4> _CumulativeTexture;
@@ -95,13 +99,15 @@ void CSAccum(uint3 id : SV_DispatchThreadID)
     CellData cur = _Output[Idx(id.xy)];
     _CumulativeTexture[id.xy] = _CumulativeBuffer[Idx(id.xy)];
 }
+#pragma endregion
 
-
+#pragma region CSInit
 #pragma kernel CSInit
 
 RWStructuredBuffer<CellData> _OutputBuffer;
 float Seed;
 
+#pragma region CSInitFunctions
 // Простая хэш-функция для генерации псевдослучайного числа [0.0 - 1.0]
 float Hash21(float2 p)
 {
@@ -435,6 +441,8 @@ void addParabolicMirror(uint3 id, float2 center, float size, float focus, float 
     }
 }
 
+#pragma endregion
+
 [numthreads(THREADS, THREADS, 1)]
 void CSInit(uint3 id : SV_DispatchThreadID)
 {
@@ -481,7 +489,7 @@ void CSInit(uint3 id : SV_DispatchThreadID)
 
     _OutputBuffer[Idx(id.xy)] = currentCell;
 }
-
+#pragma endregion
 
 #pragma kernel CSFindBounds
 
