@@ -1,0 +1,29 @@
+// Указываем имя функции-ядра, которую можно будет вызвать из C#
+#pragma kernel CSMain
+
+// Объявляем буферы данных. 
+// StructuredBuffer — только для чтения (массивы A и B)
+// RWStructuredBuffer — Read/Write, для чтения и записи (массив C)
+StructuredBuffer<float> bufferA;
+StructuredBuffer<float> bufferB;
+RWStructuredBuffer<float> bufferC;
+
+// Задаем размер ОДНОЙ группы потоков (Thread Group).
+// [numthreads(X, Y, Z)] — у нас группа будет линейной, из 64 потоков.
+[numthreads(256, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    // SV_DispatchThreadID — это глобальный уникальный индекс текущего потока в сетке.
+    // Так как наша сетка одномерная, нам нужен только id.x
+    uint index = id.x;
+    uint buffSize;
+    uint stride;
+    bufferA.GetDimensions(buffSize, stride);
+    if (index >= buffSize)
+    {
+        return;
+    }
+
+    // Складываем элементы под этим индексом
+    bufferC[index] = bufferA[index] * bufferA[index] + bufferB[index];
+}
