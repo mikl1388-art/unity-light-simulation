@@ -1,18 +1,100 @@
 // ReSharper disable CppInconsistentNaming
 
-#define THREADS 16
+#define THREADS 64
 
-struct star
+struct Star
+{
+    float4 posVel; //xy - positon, zw - velocity
+    float4 data; // x - mass
+}; 
 
 #pragma region CSMain
 #pragma kernel CSMain
 
-RWTexture2D<float4> Result;
+RWStructuredBuffer<Star> _Input;
+uint _StarsCount;
+float _Softening;
+float G;
+float _DeltaTime;
 
-[numthreads(THREADS, THREADS,1)]
+[numthreads(THREADS, 1, 1)]
 void CSMain (uint3 id : SV_DispatchThreadID)
 {
+    if (id.x >= _StarsCount) return;
+
+    float2 pos1 = _Input[id.x].posVel.xy;
+    float2 vel1 = _Input[id.x].posVel.zw;
     
+    float2 totalAcceleration = float2(0.0, 0.0);
+    
+    for (uint i = 0; i < _StarsCount; i++)
+    {
+        if (i == id.x) continue; 
+        
+        float2 pos2 = _Input[i].posVel.xy;
+        float mass2 = _Input[i].data.x;
+        float2 dir = pos2 - pos1;
+        float distSqr = dot(dir, dir) + _Softening; 
+        float invDist = rsqrt(distSqr); // 1 / sqrt(distSqr)
+        float invDist3 = invDist * invDist * invDist;
+        totalAcceleration += dir * (G * mass2 * invDist3);
+    }
+    vel1 += totalAcceleration * _DeltaTime;
+    pos1 += vel1 * _DeltaTime;
+    _Input[id.x].posVel = float4(pos1, vel1);
 }
 
+#pragma endregion
+
+#pragma region CSOptimised
+#pragma kernel CSOptimised
+#define BLOCK_SIZE 64
+
+groupshared float3 sharedStars[BLOCK_SIZE]; // xy = pos, z = mass
+
+[numthreads(BLOCK_SIZE, 1, 1)]
+void CSOptimised (uint3 id : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
+{
+    float2 pos1 = _Input[id.x].posVel.xy;
+    float2 vel1 = _Input[id.x].posVel.zw;
+    float2 totalAcceleration = float2(0.0, 0.0);
+    uint totalBlocks = (_StarsCount + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    for (uint block = 0; block < totalBlocks; block++)
+    {
+        uint i = block * BLOCK_SIZE; // Глобальный шаг порции
+
+        // 1. Вся группа совместно загружает данные
+        uint globalReadIndex = i + groupIndex;
+        if (globalReadIndex < _StarsCount) {
+            sharedStars[groupIndex] = float3(_Input[globalReadIndex].posVel.xy, _Input[globalReadIndex].data.x);
+        } else {
+            sharedStars[groupIndex] = float3(0.0, 0.0, 0.0);
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        // 2. Считаем силы
+        for (uint j = 0; j < BLOCK_SIZE; j++)
+        {
+            uint currentStarGlobalIndex = i + j;
+            
+            if (currentStarGlobalIndex == id.x) continue; 
+            if (currentStarGlobalIndex >= _StarsCount) break; 
+
+            float2 pos2 = sharedStars[j].xy;
+            float mass2 = sharedStars[j].z;
+            
+            float2 dir = pos2 - pos1;
+            float distSqr = dot(dir, dir) + _Softening; 
+            float invDist = rsqrt(distSqr);
+            float invDist3 = invDist * invDist * invDist;
+            
+            totalAcceleration += dir * (G * mass2 * invDist3);
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    
+    vel1 += totalAcceleration * _DeltaTime;
+    _Input[id.x].posVel = float4(pos1 + vel1 * _DeltaTime, vel1);
+}
 #pragma endregion

@@ -53,9 +53,9 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     CellData cur = _Input[Idx(id.xy)];
     CellData newCell = cur;
     
-    
-    _CumulativeBuffer[Idx(id.xy)] = float4(cur.pos.rgb, cur.mass);
-    //_CumulativeBuffer[Idx(id.xy)] += float4(max(cur.pos.rgb, 0) * _CumulativeRatio, cur.mass);
+    // TODO: переключение режима
+    //_CumulativeBuffer[Idx(id.xy)] = float4(cur.pos.rgb, cur.mass);
+    _CumulativeBuffer[Idx(id.xy)] += float4(max(cur.pos.rgb, 0) * _CumulativeRatio, cur.mass);
     
     float isWave = step(0, cur.mass);
     
@@ -479,12 +479,13 @@ void CSInit(uint3 id : SV_DispatchThreadID)
     addRectangle(id, 0.27 * X0, 0.0, 3.0, Y * 0.5 - 0.5 * spacer - gap, float4(0, 0, 0, 0), -1.0, currentCell);
     addRectangle(id, 0.27 * X, Y * 0.5 - 0.5 * spacer, 3.0, spacer, float4(0, 0, 0, 0), -1.0, currentCell);*/
     
-    //addGaussianBeam(id, float2(0.1 * X, 0.5 * Y), float2(1, 0), max(5, 0.045 * Y), max(5, 0.045 * Y), 0.5, 1, currentCell);
-    //addTriangle(id, float2(0.30 * X, 0.3 * Y), float2(0.6 * X, 0.3 * Y), float2(0.45 * X, 0.8 * Y), float4(0, 0, 0, 0), 2, currentCell);
-    //addConcaveLens(id, float2(0.45 * X, halfY), Y * 0.3, Y * 0.25, currentCell);
+    /*addGaussianBeam(id, float2(0.1 * X, 0.5 * Y), float2(1, 0), max(5, 0.045 * Y), max(5, 0.045 * Y), 0.5, 1, currentCell);
+    addTriangle(id, float2(0.30 * X, 0.3 * Y), float2(0.6 * X, 0.3 * Y), float2(0.45 * X, 0.8 * Y), float4(0, 0, 0, 0), 2, currentCell);
+    addConcaveLens(id, float2(0.45 * X, halfY), Y * 0.3, Y * 0.25, currentCell);*/
     
-    addGaussianBeam(id, float2(0.1 * X, 0.5 * Y), float2(1, 0), max(5, 0.1 * Y), max(5, 0.1 * Y), 0.5, 1, currentCell);
-    addAsphericLens(id, float2(0.4 * X, 0.5 * Y), Y * 0.5, Y * 0.1, currentCell);
+    addGaussianBeam(id, float2(0.1 * X, 0.7 * Y), float2(1, 0), max(5, 0.1 * Y), max(5, 0.1 * Y), 0.5, 1, currentCell);
+    addCircle(id, 0.4 * X, 0.5 * Y, Y * 0.35, float4(0,0,0,0), 3, currentCell);
+    //addAsphericLens(id, float2(0.4 * X, 0.5 * Y), Y * 0.5, Y * 0.1, currentCell); 
     //addParabolicMirror(id, float2(halfX, halfY), Y * 0.3, Y * 0.15, 5, 45, currentCell);
 
     _OutputBuffer[Idx(id.xy)] = currentCell;
@@ -507,4 +508,42 @@ void CSFindBounds(uint3 id : SV_DispatchThreadID)
     // Безопасное параллельное сравнение по всей видеокарте
     InterlockedMin(boundsBuffer[0], intVal);
     InterlockedMax(boundsBuffer[1], intVal);
+}
+
+#pragma kernel CSImageInit
+
+Texture2D<float4> SourceImage;
+float MaxWeight;
+
+[numthreads(THREADS, THREADS, 1)]
+void CSImageInit(uint3 id : SV_DispatchThreadID)
+{
+    if ((int)id.x >= _FieldSize.x || (int)id.y >= _FieldSize.y)
+        return;
+
+    float4 color = SourceImage[id.xy];
+
+    float finalMass = 1.0;
+
+    if (color.r > 0.9f && color.b < 0.1f)
+    {
+        finalMass = -1.0f;
+    }
+    else
+    {
+        finalMass = 1.0 + color.b * MaxWeight;
+    }
+    
+    CellData currentCell;
+    float bri = 1.0 * color.g;
+    currentCell.pos = float4(bri, bri, bri, 0.0);
+    currentCell.vel = float4(0.0, 0.0, 0.0, 0.0);
+    currentCell.mass = finalMass;
+    currentCell.isValid = 1.0;
+    float X = _FieldSize.x;
+    float Y = _FieldSize.y;
+    addGaussianBeam(id, float2(0.1 * X, 0.5 * Y), float2(1, 0), max(5, 0.1 * Y), max(5, 0.1 * Y), 0.5, 1, currentCell);
+    
+
+    _OutputBuffer[Idx(id.xy)] = currentCell;
 }

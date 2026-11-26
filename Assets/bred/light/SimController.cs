@@ -15,8 +15,12 @@ public enum DebugMode
 [SuppressMessage("ReSharper", "CheckNamespace")]
 public class SimController : MonoBehaviour
 {
+    [Header("Инициализация")]
     [Tooltip("Размер поля")]
     public Vector2Int fieldSize = new Vector2Int(512, 512);
+    public Texture2D InitImage;
+    public float MaxWeight = 3f;
+    [Space(10)]
     public float stiffness = 1.0f; 
     [Tooltip("Скорость симуляции")]
     [Range(1, 30)]
@@ -65,7 +69,7 @@ public class SimController : MonoBehaviour
     private int frameCount = 0;
     private float badTime = 0f;
 
-    private int debugInt = 0;
+    //private int debugInt = 0;
 
     [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
     struct CellData
@@ -144,7 +148,7 @@ public class SimController : MonoBehaviour
         if (fpsTimer >= 0.5f)
         {
             float currentFPS = frameCount / fpsTimer;
-            UpdateDebugText(currentFPS, badTime);
+            UpdateDebugText(currentFPS);
 
             if (currentFPS < minAllowedFPS && simSpeed > 1)
             {
@@ -293,19 +297,30 @@ public class SimController : MonoBehaviour
     private void InitializeSimulation(ComputeBuffer buffer)
     {
         int initKernel = computeShader.FindKernel("CSInit");
-        computeShader.SetInts(fieldSizeID, fieldSize.x, fieldSize.y);
-        computeShader.SetFloat("Seed", seed);
+        if (InitImage)
+        {
+            initKernel = computeShader.FindKernel("CSImageInit");
+            computeShader.SetInts(fieldSizeID, InitImage.width, InitImage.height);
+            Debug.Log($"{InitImage.width}, {InitImage.height}");
+            computeShader.SetFloat("MaxWeight", MaxWeight);
+            computeShader.SetTexture(initKernel, "SourceImage", InitImage);
+            threadGroupsX = Mathf.CeilToInt((float)InitImage.width / ThreadSize);
+            threadGroupsY = Mathf.CeilToInt((float)InitImage.height / ThreadSize);
+        }
+        else
+        {
+            computeShader.SetInts(fieldSizeID, fieldSize.x, fieldSize.y);
+            computeShader.SetFloat("Seed", seed);
+        }
         computeShader.SetBuffer(initKernel, "_OutputBuffer", buffer);
         computeShader.Dispatch(initKernel, threadGroupsX, threadGroupsY, 1);
-        DebugMinMax(buffer);
+        //DebugMinMax(buffer);
     }
 
-    private void UpdateDebugText(float fps, float badTime)
+    private void UpdateDebugText(float fps)
     {
-        if (debugText != null)
+        if (debugText)
         {
-            // Строка интерполяции ($): объединяем FPS и simSpeed в один текст
-            // \n переносит скорость на новую строку
             debugText.text = $"FPS: {fps:F1}\nSpeed: {simSpeed}x\nBad time: {badTime}";
         }
     }
